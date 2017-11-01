@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+
+#-------------------------------------------------------------------------------
+# Utility functions.
+
+cmd_fail() {
+    if [[ $? != 0 ]]; then
+        echo "failed."
+        exit 1
+    fi
+}
+
+cmd_result() {
+    cmd_fail
+    echo "success."
+}
+
+remove_if_exists() {
+    local file_path="$1"
+    if [[ -e $file_path ]]; then
+        echo -n "Removing existing ${file_path##*/} file/directory... "
+        rm -r "$file_path"
+        cmd_result
+    fi
+}
+
+echo_hrule() {
+    echo "----------------------------------------"
+}
+
+#-------------------------------------------------------------------------------
+# Download function.
+
+# Downloads, verifies, and unarchives OpenSSL.
+# After successfully calling, a directory such
+# as openssl-1.1.0g will be ready for use.
+download_openssl() {
+    local url=$1  # URL to an OpenSSL tar.gz file such as openssl-1.1.0g.tar.gz.
+    local hash=$2 # Valid SHA-256 hash of this file.
+    
+    local openssl_file=${url##*/}             # openssl-1.1.0g.tar.gz
+    local openssl_dir=${openssl_file%.tar.gz} # openssl-1.1.0g
+    
+    echo "Downloading $openssl_file..."
+    curl -O --progress-bar $url
+    cmd_result
+    
+    echo -n "Verifying downloaded $openssl_file... "
+    local hash_downloaded=$(shasum -a 256 $openssl_file)
+    local hash_valid="${hash}  $openssl_file" # Note the two spaces.
+    if [[ $hash_downloaded != $hash_valid ]]; then
+        echo "failed."
+        exit 1
+    fi
+    echo "success."
+    
+    remove_if_exists $openssl_dir
+    
+    echo -n "Unarchiving $openssl_file... "
+    tar -xzf $openssl_file
+    cmd_result
+    
+    echo -n "Removing $openssl_file... "
+    rm -r $openssl_file
+    cmd_result
+}
+
+#-------------------------------------------------------------------------------
+# Compilation functions.
+# After successfully calling any of the compile_openssl_[platform]
+# functions, an openssl-[platform] directory will be ready for
+# use; it will contain two subdirectories: include/openssl with
+# the header files, and lib with the .a static library files.
+
+# A helper function for the compile_openssl_[platform] functions.
+# Assumes we are inside an OpenSSL source directory.
+_configure_common() {
+    local install_dir=$1   # The prefix dir relative to OpenSSL source dir.
+    local openssl_dir=$2   # For more descriptive echo.
+    local log_prefix=$3    # For more descriptive log filenames.
+    local architecture=$4  # For more descriptive echo.
+    local configuration=$5 # Configuration for OpenSSL’s Configure script.
+    
+    remove_if_exists $install_dir
+    echo -n "Creating install directory $install_dir... "
+    mkdir $install_dir
+    cmd_result
+    
+    local config_log=$log_prefix-config.log
+    echo -n "Configuring $architecture build (see $openssl_dir/$config_log)... "
+    ./Configure --prefix="$PWD/$install_dir" no-shared $configuration \
+        > $config_log 2>&1
+    cmd_result
+}
+
+# A helper function for the compile_openssl_[platform] functions.
+# Assumes we are inside an OpenSSL source directory.
+_make_common() {
+    local openssl_dir=$1 # For more descriptive echos.
+    local log_prefix=$2  # For more descriptive log filenames.
+    local run_tests=$3   # yes to run tests; no otherwise.
+    
+    local make_log=$log_prefix-make.log
+    echo -n "Building (this takes a while; please wait; "
+    echo -n "see $openssl_dir/$make_log)... "
+    make > $make_log 2>&1
+    cmd_result
+    
+    if [[ $run_tests = yes ]]; then
+        local test_log=$log_prefix-test.log
+        echo -n "Running tests (this takes a while; please wait; "
+        echo -n "see $openssl_dir/$test_log)... "
+        make test > $test_log 2>&1
+        cmd_result
+    fi
+    
+    local install_log=$log_prefix-install.log
+    echo -n "Installing (see $openssl_dir/$install_log)... "
+    make install_sw > $install_log 2>&1
+    cmd_result
+}
+
+# Compile for 64-bit macOS development.
+# One architecture: x86_64.
+compile_openssl_macos() {
+    local openssl_dir=$1
+    
+    echo -n "cd-ing into $openssl_dir... "
+    cd $openssl_dir
+    cmd_result
+    
+    local install_dir=macos-install-dir
+    local log_prefix=macos
+    _configure_common $install_dir $openssl_dir $log_prefix \
+                      x86_64 darwin64-x86_64-cc
+    _make_common $openssl_dir $log_prefix yes # yes = run tests.
+    
+    echo -n "cd-ing back into the script’s directory... "
+    cd ..
+    cmd_result
+    
+    remove_if_exists openssl-macos
+    echo -n "Creating openssl-macos and openssl-macos/lib directories... "
+    mkdir -p openssl-macos/lib
+    cmd_result
+    
+    echo -n "Moving libcrypto.a into place... "
+    mv $openssl_dir/$install_dir/lib/libcrypto.a openssl-macos/lib
+    cmd_result
+    
+    echo -n "Moving libssl.a into place... "
+    mv $openssl_dir/$install_dir/lib/libssl.a openssl-macos/lib
+    cmd_result
+    
+    echo -n "Moving header files into place... "
+    mv $openssl_dir/$install_dir/include openssl-macos
+    cmd_result
+}
+
+# Compile for 64-bit iOS development.
+# Two architectures: x86_64 (simulator) and arm64 (device).
+# The .a files will be fat files for both architectures,
+# and the opensslconf.h header file will be constructed
+# (with #ifdefs) to support both architectures.
+compile_openssl_ios() {
+    local openssl_dir=$1
+    
+    echo -n "cd-ing into $openssl_dir... "
+    cd $openssl_dir
+    cmd_result
+    
+    declare -x CROSS_COMPILE=`xcode-select --print-path`
+    CROSS_COMPILE=${CROSS_COMPILE}/Toolchains/XcodeDefault.xctoolchain/usr/bin/
+    declare -x CROSS_TOP=`xcode-select --print-path`
+    CROSS_TOP=${CROSS_TOP}/Platforms/iPhoneOS.platform/Developer
+    declare -x CROSS_SDK=iPhoneOS.sdk
+    
+    # Note: We are not running tests; we can’t use macOS to test arm64
+    # binaries. I don’t know of a good way to test OpenSSL for iOS.
+    local device_install_dir=ios-device-install-dir
+    local log_prefix=ios-device
+    _configure_common $device_install_dir $openssl_dir $log_prefix \
+                      arm64 ios64-cross
+    _make_common $openssl_dir $log_prefix no # no = no tests.
+    
+    echo -n "Running 'make clean'... "
+    local clean_log=$log_prefix-clean.log
+    make clean > $clean_log 2>&1
+    cmd_result
+    
+    declare -x CROSS_TOP=`xcode-select --print-path`
+    CROSS_TOP=${CROSS_TOP}/Platforms/iPhoneSimulator.platform/Developer
+    declare -x CROSS_SDK=iPhoneSimulator.sdk
+    
+    # * It turns out that OpenSSL tests built for
+    #   the iOS simulator can’t be run on macOS.
+    # * Without the changed CFLAGS, Xcode 9 warns
+    #   that although code built for macOS currently
+    #   runs on the iOS simulator, this will stop 
+    #   working in the future.
+    local simulator_install_dir=ios-simulator-install-dir
+    local log_prefix=ios-simulator
+    _configure_common $simulator_install_dir $openssl_dir $log_prefix \
+                      x86_64 darwin64-x86_64-cc
+    echo -n "Adding iOS-specific CFLAGS to Makefile... "
+    local sed_command='s/^CFLAGS=/CFLAGS=-mios-version-min=7.0.0 '
+    sed_command="$sed_command"'-isysroot \$(CROSS_TOP)\/SDKs\/\$(CROSS_SDK) /'
+    sed -ie "$sed_command" Makefile
+    cmd_result
+    _make_common $openssl_dir $log_prefix no # no = no tests.
+    
+    echo -n "cd-ing back into the script’s directory... "
+    cd ..
+    cmd_result
+    
+    remove_if_exists openssl-ios
+    echo -n "Creating openssl-ios/lib and openssl-ios/include/openssl "
+    echo -n "directories... "
+    mkdir -p openssl-ios/{lib,include/openssl}
+    cmd_result
+    
+    # Create a combined opensslconf.h header file that looks like this:
+    #     //----------------------------------------
+    #     #ifdef __aarch64__
+    #     [iOS device header file]
+    #     #endif
+    #     //----------------------------------------
+    #     #ifdef __x86_64__
+    #     [iOS simulator header file]
+    #     #endif
+    #     //----------------------------------------
+    echo -n "Creating opensslconf.h for both platforms... "
+    local conf_path=include/openssl/opensslconf.h
+    local arm64_conf_file=$(cat $openssl_dir/$device_install_dir/$conf_path)
+    local x86_64_conf_file=$(cat $openssl_dir/$simulator_install_dir/$conf_path)
+    if [[ ${#arm64_conf_file} < 200 || ${#x86_64_conf_file} < 200 ]]; then
+        echo "failed: Unable to obtain arm64 and x86_64 config header files."
+        exit 1
+    fi
+    local combined_conf_file=$(printf "%s\n" \
+        "//----------------------------------------" \
+        "#ifdef __aarch64__" \
+        "${arm64_conf_file}" \
+        "#endif" \
+        "//----------------------------------------" \
+        "#ifdef __x86_64__" \
+        "${x86_64_conf_file}" \
+        "#endif" \
+        "//----------------------------------------")
+    if [[ ${#combined_conf_file} < 400 ]]; then
+        echo "failed: Unable to obtain combined config header file."
+        exit 1
+    fi
+    echo "$combined_conf_file" > openssl-ios/$conf_path
+    cmd_result
+    
+    echo -n "Removing original opensslconf.h files... "
+    rm $openssl_dir/$device_install_dir/$conf_path \
+        && rm $openssl_dir/$simulator_install_dir/$conf_path
+    cmd_result
+    
+    # The remaining header files should be identical on both
+    # platforms. We now make sure of this, just in case.
+    echo -n "Making sure that remaining header files "
+    echo -n "are identical on both platforms... "
+    cd $openssl_dir/$device_install_dir/include/openssl \
+        && local device_sha=$(shasum -a 256 *.h) \
+        && cd ../../../../ \
+        && cd $openssl_dir/$simulator_install_dir/include/openssl \
+        && local simulator_sha=$(shasum -a 256 *.h) \
+        && cd ../../../../
+    cmd_fail
+    if [[ ${#device_sha} < 500 || ${#simulator_sha} < 500 ]]; then
+        echo "failed: Unable to obtain hashes of header files."
+        exit 1
+    fi
+    if [[ $device_sha != $simulator_sha ]]; then
+        echo "failed: Mismatch."
+        exit 1
+    fi
+    echo "success."
+    
+    # (We could have picked the simulator header files instead.
+    # It doesn’t matter because we now know that the header files
+    # (other than opensslconf.h) are the same on both platforms.)
+    echo -n "Moving header files into place... "
+    mv $openssl_dir/$device_install_dir/include/openssl/*.h \
+       openssl-ios/include/openssl
+    cmd_result
+    
+    echo -n "Creating and moving into place fat libraries... "
+    lipo $openssl_dir/$device_install_dir/lib/libcrypto.a \
+         $openssl_dir/$simulator_install_dir/lib/libcrypto.a \
+         -create -output openssl-ios/lib/libcrypto.a \
+    && \
+    lipo $openssl_dir/$device_install_dir/lib/libssl.a \
+         $openssl_dir/$simulator_install_dir/lib/libssl.a \
+         -create -output openssl-ios/lib/libssl.a
+    cmd_result
+}
+
+#-------------------------------------------------------------------------------
+
+if [[ $PWD != */compile-openssl-unix ]]; then
+    echo -n "Error: Please call script from its own directory; "
+    echo    "like this: ./compile-openssl-unix"
+    exit 1
+fi
+
+if [[ $PWD = *" "* ]]; then
+    echo -n "Error: Please move the compile-openssl-unix "
+    echo -n "directory to a path that does not contain spaces. "
+    echo    "(OpenSSL’s build fails for such paths.)"
+    exit 1
+fi
+
+if [[ $1 != macos && $1 != ios ]]; then
+    echo "Error: Invalid arguments. Valid first arguments: macos, ios"
+    exit 1
+fi
+
+openssl_url=https://www.openssl.org/source/openssl-1.1.0g.tar.gz
+openssl_hash=de4d501267da39310905cb6dc8c6121f7a2cad45a7707f76df828fe1b85073af
+
+openssl_file=${openssl_url##*/}     # openssl-1.1.0g.tar.gz
+openssl_dir=${openssl_file%.tar.gz} # openssl-1.1.0g
+
+download_openssl $openssl_url $openssl_hash
+
+echo_hrule
+
+if [[ $1 = macos ]]; then
+    compile_openssl_macos $openssl_dir
+fi
+
+if [[ $1 = ios ]]; then
+    compile_openssl_ios $openssl_dir
+fi
+
+remove_if_exists $openssl_dir
+
+echo_hrule
+
+echo "Success!"
+
+#-------------------------------------------------------------------------------
