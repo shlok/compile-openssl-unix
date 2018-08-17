@@ -33,13 +33,13 @@ echo_hrule() {
 
 # Downloads, verifies, and unarchives OpenSSL.
 # After successfully calling, a directory such
-# as openssl-1.1.0g will be ready for use.
+# as openssl-1.1.0i will be ready for use.
 download_openssl() {
-    local url=$1  # URL to an OpenSSL tar.gz file such as openssl-1.1.0g.tar.gz.
+    local url=$1  # URL to an OpenSSL tar.gz file such as openssl-1.1.0i.tar.gz.
     local hash=$2 # Valid SHA-256 hash of this file.
     
-    local openssl_file=${url##*/}             # openssl-1.1.0g.tar.gz
-    local openssl_dir=${openssl_file%.tar.gz} # openssl-1.1.0g
+    local openssl_file=${url##*/}             # openssl-1.1.0i.tar.gz
+    local openssl_dir=${openssl_file%.tar.gz} # openssl-1.1.0i
     
     echo "Downloading $openssl_file..."
     curl -O --progress-bar $url
@@ -319,11 +319,11 @@ if [[ $1 != macos && $1 != ios ]]; then
     exit 1
 fi
 
-openssl_url=https://www.openssl.org/source/openssl-1.1.0g.tar.gz
-openssl_hash=de4d501267da39310905cb6dc8c6121f7a2cad45a7707f76df828fe1b85073af
+openssl_url=https://www.openssl.org/source/openssl-1.1.0i.tar.gz
+openssl_hash=ebbfc844a8c8cc0ea5dc10b86c9ce97f401837f3fa08c17b2cdadc118253cf99
 
-openssl_file=${openssl_url##*/}     # openssl-1.1.0g.tar.gz
-openssl_dir=${openssl_file%.tar.gz} # openssl-1.1.0g
+openssl_file=${openssl_url##*/}     # openssl-1.1.0i.tar.gz
+openssl_dir=${openssl_file%.tar.gz} # openssl-1.1.0i
 
 download_openssl $openssl_url $openssl_hash
 
